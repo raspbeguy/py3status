@@ -71,6 +71,47 @@ class NoneSetting:
         return 'None'
 
 
+class Task:
+    """
+    A simple task that can be run by the scheduler.
+
+    NOTE: Currently the task runs in the main thread but if needed we can
+    enhance to allow it to run as a thread
+    """
+
+    def _init(self, common):
+        """
+        Initialization before the task is first run
+        """
+        self.common = common
+
+    def update(self):
+        raise NotImplemented()
+
+
+class CheckI3StatusThread(Task):
+    """
+    Checks that the i3status thread is alive
+    """
+
+    def __init__(self, i3status_thread):
+        self.i3status_thread = i3status_thread
+
+    def update(self):
+        # check i3status thread
+        if not self.i3status_thread.is_alive():
+            err = self.i3status_thread.error
+            if not err:
+                err = 'I3status died horribly.'
+            self.common.py3_wrapper.notify_user(err)
+        else:
+            # check again in 5 seconds
+            # FIXME timeout_add_queue should be available in Common
+            self.common.py3_wrapper.timeout_add_queue.append(
+                (self, int(time.time()) + 5)
+            )
+
+
 class Common:
     """
     This class is used to hold core functionality so that it can be shared more
@@ -209,9 +250,9 @@ class Py3statusWrapper:
         self.update_request = Event()
 
         # shared code
-        common = Common(self)
-        self.get_config_attribute = common.get_config_attribute
-        self.report_exception = common.report_exception
+        self.common = Common(self)
+        self.get_config_attribute = self.common.get_config_attribute
+        self.report_exception = self.common.report_exception
 
         # these are used to schedule module updates
         self.timeout_add_queue = deque()
@@ -232,6 +273,18 @@ class Py3statusWrapper:
         # update request is due then trigger an update now.
         if self.timeout_due is None or cache_time < self.timeout_due:
             self.update_request.set()
+
+    def add_task_to_timeout_queue(self, task, cache_time=0):
+        """
+        This adds a tasked to the timeout queue and initializes it.  The task
+        must be a Task.
+        """
+        if not isinstance(task, Task):
+            self.notify_user('Non-Task task added to timeout queue')
+        else:
+            # initialize task
+            task._init(self.common)
+            self.timeout_add_queue.append((task, cache_time))
 
     def timeout_process_add_queue(self, module, cache_time):
         """
@@ -605,6 +658,11 @@ class Py3statusWrapper:
         if self.config['debug']:
             self.log('i3status thread {} with config {}'.format(
                 i3s_mode, self.config['py3_config']))
+
+        # add i3status thread monitoring task
+        if i3s_mode == 'started':
+            task = CheckI3StatusThread(self.i3status_thread)
+            self.add_task_to_timeout_queue(task)
 
         # setup input events thread
         self.events_thread = Events(self)
